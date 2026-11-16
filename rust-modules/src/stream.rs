@@ -187,6 +187,56 @@ fn log_endpoint(path: &str) -> &str {
     }
 }
 
+/// Bytes still owed by the body, as a read-size bound: never negative, and SATURATING at
+/// `usize::MAX` rather than truncating. On the television `usize` is 32 bits, so the plain
+/// `as usize` this replaces wrapped every remainder modulo 4 GiB: a range response with exactly
+/// 2^32 bytes left read as 0 and was finished as complete, and any body over 4 GiB stopped at
+/// byte `size - 4 GiB`. A 9.4 GB remux therefore cut at 54% — and a resume past that point
+/// reopened there and was cut again at once ("no reopen crossed it").
+fn body_remaining(remain: i64) -> usize {
+    saturate_len(remain, usize::MAX)
+}
+
+/// [`body_remaining`] against an explicit ceiling, so the 32-bit case is testable on a 64-bit host.
+fn saturate_len(remain: i64, max: usize) -> usize {
+    if remain <= 0 {
+        0
+    } else if (remain as u64) > max as u64 {
+        max
+    } else {
+        remain as usize
+    }
+}
+
+#[cfg(test)]
+mod body_remaining_tests {
+    use super::saturate_len;
+
+    const U32: usize = u32::MAX as usize;
+
+    #[test]
+    fn a_remainder_of_four_gib_or_more_never_reads_as_zero_on_a_32_bit_target() {
+        let four_gib: i64 = 1 << 32;
+        // What the old cast produced on the television: the remainder vanished.
+        assert_eq!(four_gib as u32, 0);
+        assert_eq!((four_gib + 49) as u32, 49);
+        // The bound saturates instead, so the read goes on.
+        assert_eq!(saturate_len(four_gib, U32), U32);
+        assert_eq!(saturate_len(four_gib + 49, U32), U32);
+        // The real file from the report: 9_414_886_545 bytes, cut at 5_119_919_249.
+        assert_eq!(saturate_len(9_414_886_545 - 5_119_919_249, U32), U32);
+    }
+
+    #[test]
+    fn small_and_spent_remainders_are_unchanged() {
+        assert_eq!(saturate_len(0, U32), 0);
+        assert_eq!(saturate_len(-7, U32), 0);
+        assert_eq!(saturate_len(1, U32), 1);
+        assert_eq!(saturate_len(U32 as i64, U32), U32);
+        assert_eq!(super::body_remaining(123), 123);
+    }
+}
+
 /// The event-log line for a response body that came up short, or `None` when there is nothing to
 /// report. Pure, so the decision can be graded on the host without a socket.
 ///
@@ -1864,7 +1914,7 @@ pub(crate) fn http_read_until(
         }
         let mut n = n;
         if hs.content_length >= 0 {
-            let remain = (hs.content_length - hs.consumed).max(0) as usize;
+            let remain = body_remaining(hs.content_length - hs.consumed);
             if remain == 0 {
                 finish_body(hs);
                 return 0;
@@ -2193,9 +2243,9 @@ pub(crate) fn http_drain_available(hs: *mut HttpStream, dst: &mut [u8]) -> c_int
             }
         }
         let remain = if hs.chunked != 0 {
-            hs.chunk_left.max(0) as usize
+            body_remaining(hs.chunk_left)
         } else if hs.content_length >= 0 {
-            (hs.content_length - hs.consumed).max(0) as usize
+            body_remaining(hs.content_length - hs.consumed)
         } else {
             dst.len()
         };
