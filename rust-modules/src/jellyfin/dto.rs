@@ -519,6 +519,25 @@ pub(crate) struct MediaStreamDto {
     /// `detail::dovi_from_range` (present + base-layer compat; bare `DOVI` reads as Profile 5).
     #[serde(rename = "VideoRangeType")]
     pub(crate) video_range_type: Option<String>,
+    /// Dolby Vision configuration record, as the server's probe read it (Jellyfin 10.9+). Absent
+    /// on a non-DV stream and on older servers; `detail::dovi_from_stream` prefers these to the
+    /// `VideoRangeType` spelling, which cannot name a profile.
+    #[serde(rename = "DvProfile")]
+    pub(crate) dv_profile: Option<i32>,
+    #[serde(rename = "DvLevel")]
+    pub(crate) dv_level: Option<i32>,
+    #[serde(rename = "DvVersionMajor")]
+    pub(crate) dv_version_major: Option<i32>,
+    #[serde(rename = "DvVersionMinor")]
+    pub(crate) dv_version_minor: Option<i32>,
+    #[serde(rename = "DvBlSignalCompatibilityId")]
+    pub(crate) dv_bl_compat: Option<i32>,
+    #[serde(rename = "RpuPresentFlag")]
+    pub(crate) dv_rpu_present: Option<i32>,
+    #[serde(rename = "ElPresentFlag")]
+    pub(crate) dv_el_present: Option<i32>,
+    #[serde(rename = "BlPresentFlag")]
+    pub(crate) dv_bl_present: Option<i32>,
     #[serde(rename = "Width")]
     pub(crate) width: Option<i32>,
     #[serde(rename = "Height")]
