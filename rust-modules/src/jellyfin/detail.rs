@@ -155,7 +155,7 @@ pub(crate) fn playing_item_from_dto(
                 width = st.width.unwrap_or(0) as i64;
                 height = st.height.unwrap_or(0) as i64;
                 video_fps = st.real_frame_rate.unwrap_or(0.0) as f64;
-                dovi = dovi_from_range(st.video_range_type.as_deref());
+                dovi = dovi_from_stream(st);
             }
             "Audio" => audio.push(convert_stream(st)),
             "Subtitle" => subs.push(convert_stream(st)),
@@ -176,8 +176,8 @@ pub(crate) fn playing_item_from_dto(
         container: src.and_then(|s| s.container.clone()).unwrap_or_default(),
         height,
         bitrate: src.and_then(|s| s.bitrate).unwrap_or(0) / 1_000,
-        // Derived from `VideoRangeType` (see `dovi_from_range`): DV present, base layer named
-        // when the string names one, and bare `DOVI` read as Profile 5 (single-layer IPT-PQ).
+        // The server's DV configuration record when it sent one, else derived from
+        // `VideoRangeType` (see `dovi_from_stream` / `dovi_from_range`).
         dovi,
         markers,
         chapters: chapters_from_dto(&it.chapters),
@@ -413,7 +413,7 @@ fn fill_streams(it: &BaseItemDto, d: &mut Detail) {
                         .video_range_type
                         .as_deref()
                         .is_some_and(|t| !t.eq_ignore_ascii_case("sdr"));
-                    d.dovi = dovi_from_range(st.video_range_type.as_deref());
+                    d.dovi = dovi_from_stream(st);
                     d.video = Some(s);
                 }
             }
@@ -429,11 +429,42 @@ fn fill_streams(it: &BaseItemDto, d: &mut Detail) {
     }
 }
 
+/// The video stream's Dolby Vision layering: the server's own configuration record when it sent
+/// one, else [`dovi_from_range`].
+///
+/// Jellyfin 10.9+ reports the record its probe read (`DvProfile`, `DvBlSignalCompatibilityId`,
+/// the present flags, level and version). With a profile in hand a single-layer file (P5, P8.x)
+/// can be declared to the panel and plays as Dolby Vision; from the `VideoRangeType` string alone
+/// a P8.1 is only "DV with an HDR10 base layer" and plays as HDR10.
+///
+/// A file with an enhancement layer (P7) deliberately keeps the string reading: the gate refuses
+/// `el_present` outright (there is no interleaver), while the string reading plays its HDR10 base
+/// layer — a correct picture, and what such a file did before this record was read.
+fn dovi_from_stream(st: &super::dto::MediaStreamDto) -> Dovi {
+    let profile = st.dv_profile.unwrap_or(0);
+    if profile <= 0 || st.dv_el_present.unwrap_or(0) != 0 {
+        return dovi_from_range(st.video_range_type.as_deref());
+    }
+    Dovi {
+        present: true,
+        profile: profile as i64,
+        bl_compat: st.dv_bl_compat.unwrap_or(0).max(0) as i64,
+        el_present: false,
+        level: st.dv_level.unwrap_or(0).max(0) as i64,
+        version: (
+            st.dv_version_major.unwrap_or(0).max(0) as i64,
+            st.dv_version_minor.unwrap_or(0).max(0) as i64,
+        ),
+        bl_present: st.dv_bl_present.unwrap_or(0) != 0,
+        rpu_present: st.dv_rpu_present.unwrap_or(0) != 0,
+    }
+}
+
 /// `VideoRangeType` → the Dolby Vision layering the play gate can act on.
 ///
 /// Jellyfin names the base layer's cross-compatibility in the string (`DOVIWithHDR10`,
-/// `DOVIWithHLG`, `DOVIWithSDR` → `bl_compat` 1 / 4 / 2) but only ever reports DV presence,
-/// never a profile number. The ONE spelling that does name the profile is bare `DOVI`: it says
+/// `DOVIWithHLG`, `DOVIWithSDR` → `bl_compat` 1 / 4 / 2) but the string never carries a profile
+/// number. This is the FALLBACK for a server that sent no `DvProfile` ([`dovi_from_stream`]). The ONE spelling that does name the profile is bare `DOVI`: it says
 /// the file declares NO HDR10, HLG or SDR base layer, which is exactly the shape of a
 /// **Profile 5** (a single IPT-PQ layer with nothing an ordinary decoder can fall back on).
 /// Reading it as profile 5 is not inventing a profile — it is the only reading consistent with
@@ -459,7 +490,9 @@ fn dovi_from_range(video_range_type: Option<&str>) -> Dovi {
     }
     let (profile, bl_compat) = match t.as_str() {
         "DOVI" => (5, 0),         // no base layer at all = single-layer IPT-PQ (Profile 5)
-        "DOVIWITHHDR10" => (0, 1), // HDR10 base layer
+        // HDR10 base layer; the HDR10+ and enhancement-layer spellings (Jellyfin 10.10+) still
+        // name an HDR10-compatible base layer, which is what plays here.
+        "DOVIWITHHDR10" | "DOVIWITHHDR10PLUS" | "DOVIWITHEL" | "DOVIWITHELHDR10PLUS" => (0, 1),
         "DOVIWITHSDR" => (0, 2),   // SDR base layer
         "DOVIWITHHLG" => (0, 4),   // HLG base layer
         _ => (0, 0),               // an unrecognised DOVI spelling: no profile the gate can name
@@ -986,6 +1019,60 @@ mod tests {
         // signal + confirmed support + hevc: declare Profile 5 to the panel
         let declared = dovi.presentation(true, Supported, true).declared();
         assert_eq!(declared.map(|n| n.profile_id), Some(5));
+    }
+
+    fn video_stream(json: &str) -> crate::jellyfin::dto::MediaStreamDto {
+        serde_json::from_str(json).expect("stream parses")
+    }
+
+    #[test]
+    fn the_servers_dv_record_names_the_profile_so_a_p8_declares() {
+        use crate::webos::caps::DvCapability::Supported;
+        // The video stream a Jellyfin 12.4 server returned for a P8.1 + HDR10+ WEB-DL (#field
+        // report): the string alone read as "DV, profile unknown, no base layer named" and the
+        // file played as plain HDR10 at best.
+        let st = video_stream(
+            r#"{"Type":"Video","Codec":"hevc","VideoRangeType":"DOVIWithHDR10Plus",
+                "DvVersionMajor":1,"DvVersionMinor":0,"DvProfile":8,"DvLevel":6,
+                "RpuPresentFlag":1,"ElPresentFlag":0,"BlPresentFlag":1,
+                "DvBlSignalCompatibilityId":1}"#,
+        );
+        let dovi = dovi_from_stream(&st);
+        assert!(dovi.present);
+        assert_eq!(dovi.profile, 8);
+        assert_eq!(dovi.bl_compat, 1);
+        assert_eq!(dovi.level, 6);
+        assert_eq!(dovi.version, (1, 0));
+        assert!(dovi.bl_present && dovi.rpu_present && !dovi.el_present);
+        let declared = dovi.presentation(true, Supported, true).declared();
+        assert_eq!(declared.map(|n| n.profile_id), Some(8));
+    }
+
+    #[test]
+    fn a_dual_layer_record_keeps_playing_its_base_layer() {
+        use crate::webos::caps::DvCapability::Supported;
+        // P7 with an enhancement layer: the gate refuses `el_present`, so the record must not be
+        // allowed to turn a file that played (as HDR10) into one that is refused.
+        let st = video_stream(
+            r#"{"Type":"Video","Codec":"hevc","VideoRangeType":"DOVIWithEL",
+                "DvProfile":7,"ElPresentFlag":1,"BlPresentFlag":1,"RpuPresentFlag":1,
+                "DvBlSignalCompatibilityId":6}"#,
+        );
+        let dovi = dovi_from_stream(&st);
+        assert!(dovi.present && !dovi.el_present);
+        assert_eq!(dovi.profile, 0);
+        assert_eq!(dovi.bl_compat, 1);
+        assert_eq!(dovi.presentation(true, Supported, true).declared(), None);
+    }
+
+    #[test]
+    fn without_a_record_the_string_reading_is_unchanged() {
+        let st = video_stream(r#"{"Type":"Video","Codec":"hevc","VideoRangeType":"DOVIWithHDR10"}"#);
+        assert_eq!(dovi_from_stream(&st), dovi_from_range(Some("DOVIWithHDR10")));
+        let sdr = video_stream(r#"{"Type":"Video","Codec":"hevc","VideoRangeType":"SDR"}"#);
+        assert_eq!(dovi_from_stream(&sdr), Dovi::NONE);
+        // The HDR10+ spelling names an HDR10 base layer too.
+        assert_eq!(dovi_from_range(Some("DOVIWithHDR10Plus")).bl_compat, 1);
     }
 
     #[test]
