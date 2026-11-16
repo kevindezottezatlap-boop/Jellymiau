@@ -618,3 +618,22 @@ fn unknown_dimensions_fail_open_and_the_codec_half_still_gates() {
         "the pipeline cannot feed it at any size"
     );
 }
+
+#[test]
+fn the_direct_play_plan_carries_the_declaration_not_only_the_layering() {
+    // Field report: a P8.1 file with `dovi` correctly on the plan still played with
+    // `hdrType: none`, because the stored decision stayed `NONE` and the Load payload reads that.
+    let supported = crate::webos::caps::DvCapability::Supported;
+    let dovi = p8();
+    let decision = crate::metadata::DvDecision {
+        capability: supported,
+        presentation: dovi.presentation(true, supported, true),
+    };
+    let mut plan = Plan::default();
+    assert_eq!(plan.dv_decision, crate::metadata::DvDecision::NONE);
+    plan.set_direct_dv(dovi, decision);
+    assert_eq!(plan.dovi, dovi);
+    assert_eq!(plan.dv_decision, decision);
+    assert_eq!(plan.dv_decision.presentation.declared().map(|n| n.profile_id), Some(8));
+}
+
