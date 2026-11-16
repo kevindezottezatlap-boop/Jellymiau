@@ -851,6 +851,36 @@ pub(crate) struct Plan {
 /// the answer is "whatever the user is looking at NOW", which for an item from a shared source is
 /// the wrong authority for every id in this function. The server arrives in `env.sid` and the only
 /// client here is `client_for` of it.
+impl Plan {
+    /// The direct-play branch's Dolby Vision facts, set TOGETHER. `dovi` alone is only the
+    /// layering; the Load payload's `DolbyHdrInfo` node is driven by `dv_decision`
+    /// (`route::stream_dv_presentation`). The Jellyfin builder used to set `dovi` and leave
+    /// `dv_decision` at its `NONE` default, so no direct-played file was ever declared to the
+    /// panel and every Dolby Vision title played as its base layer.
+    pub(super) fn set_direct_dv(
+        &mut self,
+        dovi: crate::metadata::Dovi,
+        decision: crate::metadata::DvDecision,
+    ) {
+        self.dovi = dovi;
+        self.dv_decision = decision;
+    }
+}
+
+/// The declaration for a direct-played file, from one read of the cached platform answer —
+/// exactly what [`crate::metadata::Dovi::presentation_now`] computes, with the capability it used
+/// kept beside it so reloads and recovery replay this answer instead of re-deciding.
+pub(super) fn direct_play_dv_decision(
+    dovi: &crate::metadata::Dovi,
+    video_is_hevc: bool,
+) -> crate::metadata::DvDecision {
+    let capability = crate::webos::caps::capability();
+    crate::metadata::DvDecision {
+        capability,
+        presentation: dovi.presentation(!crate::metadata::dv_withheld(), capability, video_is_hevc),
+    }
+}
+
 pub(super) fn build_stream(rk: &str, part: &str, vcodec: &str, acodec: &str, env: &ResolveEnv) -> Plan {
     // The part id is derived from THIS call's `part`, before anything else runs, and published
     // here rather than by the caller after we return. It used to be written by play_movie /
@@ -1448,7 +1478,9 @@ fn build_stream_jellyfin(
         .unwrap_or(env.src_kbps);
     plan.contract.ceiling = env.quality.ceiling();
     let dovi = plan.playing.as_ref().map(|p| p.dovi).unwrap_or_default();
-    let dv = dovi.presentation_now(vcodec == "hevc");
+    // ONE capability snapshot for the gate below AND the stored decision the Load payload reads.
+    let dv_decision = direct_play_dv_decision(&dovi, vcodec == "hevc");
+    let dv = dv_decision.presentation;
     let video_dp = video_direct_plays(vcodec, src_w, src_h, dv, crate::devcaps::caps());
     plan.source_decodable = video_dp;
     let tracks = plan
@@ -1510,7 +1542,7 @@ fn build_stream_jellyfin(
         plan.fps = plan.playing.as_ref().map(|p| p.video_fps).unwrap_or(0.0);
         plan.vcodec = vcodec.to_string();
         plan.acodec = audio_declaration(aidx, &achosen, acodec);
-        plan.dovi = dovi;
+        plan.set_direct_dv(dovi, dv_decision);
         plan.immersive = plan
             .playing
             .as_ref()
