@@ -322,8 +322,25 @@ unsafe fn webos_hide_keyboard() {
             log("keyboard: WebOSHideScreenKeyboard absent on this firmware");
             return;
         }
-        let hide: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(sym);
-        hide(*addr_of!(WIN));
+        // It is the driver's `HideScreenKeyboard` hook, so its signature is SDL's
+        // `(SDL_VideoDevice *_this, SDL_Window *window)`, not `(window)`. Passing the window as
+        // `_this` made it read `_this->driverdata` from inside the window struct: a NULL on
+        // webOS 11.2 (LG o26) and a SIGSEGV in this function every time the sign-in keyboard
+        // closed. `SDL_GetVideoDevice` is exported by the NDK fork; resolved the same way, and
+        // without it the hide is skipped (SDL_StopTextInput above already hides the panel).
+        let dev_sym = dlsym(std::ptr::null_mut(), c"SDL_GetVideoDevice".as_ptr());
+        if dev_sym.is_null() {
+            log("keyboard: SDL_GetVideoDevice absent on this firmware; webOS hide skipped");
+            return;
+        }
+        let get_dev: unsafe extern "C" fn() -> *mut c_void = std::mem::transmute(dev_sym);
+        let dev = get_dev();
+        if dev.is_null() {
+            log("keyboard: no SDL video device; webOS hide skipped");
+            return;
+        }
+        let hide: unsafe extern "C" fn(*mut c_void, *mut c_void) = std::mem::transmute(sym);
+        hide(dev, *addr_of!(WIN));
         log("keyboard: panel hidden at the webOS layer");
     }
 }
