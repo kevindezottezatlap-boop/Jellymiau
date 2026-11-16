@@ -802,8 +802,9 @@ TURBOJPEG_SO := $(firstword $(wildcard $(SYSROOT)/usr/lib/libturbojpeg.so.0.*))
 # is read FROM and never in the name it is packaged UNDER. (A `pkg/appinfo.debug.json` would ship
 # under that name and fail an otherwise correct package.)
 APPINFO   = $(if $(filter stable,$(FLAVOR)),pkg/appinfo.json,pkg/.flavor/$(FLAVOR)/appinfo.json)
-# Each non-stable flavour wears its OWN badge — `pkg/dev/` (amber DEV) for debug, `pkg/nightly/`
-# (grey NIGHTLY) for nightly — because all three tiles sit side by side in one launcher.
+# Each non-stable flavour wears its OWN badge — `pkg/dev/` (amber DEV) for debug, `pkg/nightly/` (midnight
+# backdrop + moon badge, master assets/logo-nightly-master.png; not cut by tools/mkicons.py) for
+# nightly — because all three tiles sit side by side in one launcher.
 ICONDIR   = $(if $(filter nightly,$(FLAVOR)),pkg/nightly,pkg/dev)
 ICONS     = $(if $(filter stable,$(FLAVOR)),pkg/icon.png pkg/largeIcon.png,$(ICONDIR)/icon.png $(ICONDIR)/largeIcon.png)
 # `pkg/lab.json` is in this list ONLY under LAB=1, and it is the whole handoff between the two
